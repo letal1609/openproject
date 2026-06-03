@@ -1,273 +1,57 @@
+import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
 import { CommonModule } from '@angular/common';
-import { Component, computed, signal } from '@angular/core';
-import { FormsModule } from '@angular/forms';
+import { Component, computed, inject, signal } from '@angular/core';
+import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCardModule } from '@angular/material/card';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
+import { MatSelectModule } from '@angular/material/select';
+import { MatTabsModule } from '@angular/material/tabs';
+import { MatTableModule } from '@angular/material/table';
+import { Absence, ImportPreview, PlanningTriggerEvent, Resource, Sprint, SprintTask, Task, TaskDependency, WorkSilo } from './models/domain.models';
+import { AppDbService } from './services/app-db.service';
+import { CsvImportService } from './services/csv-import.service';
+import { DemoDataService } from './services/demo-data.service';
+import { ExcelImportService } from './services/excel-import.service';
+import { PlanningEngineService } from './services/planning-engine.service';
+import { PriorityResolutionService } from './services/priority-resolution.service';
+import { PRIORITY_OPTIONS, ScoringService, createDefaultPrioritization } from './services/scoring.service';
+import { TaskMappingService } from './services/task-mapping.service';
 
-type Priority = 'Haute' | 'Moyenne' | 'Basse';
-
-interface Project {
-  id: string;
-  name: string;
-  owner: string;
-  dueDate: string;
-}
-
-interface Task {
-  id: string;
-  projectId: string;
-  title: string;
-  priority: Priority;
-  done: boolean;
-}
-
-interface ProjectFlowState {
-  projects: Project[];
-  tasks: Task[];
-}
-
-interface ProjectFormModel {
-  name: string;
-  owner: string;
-  dueDate: string;
-}
-
-interface TaskFormModel {
-  title: string;
-  projectId: string;
-  priority: Priority;
-}
-
-const STORAGE_KEY = 'projectflow-state';
-
-function createSeedState(): ProjectFlowState {
-  const projects: Project[] = [
-    {
-      id: crypto.randomUUID(),
-      name: 'Lancement CRM',
-      owner: 'Camille',
-      dueDate: '2026-06-18'
-    },
-    {
-      id: crypto.randomUUID(),
-      name: 'Refonte portail client',
-      owner: 'Nora',
-      dueDate: '2026-07-05'
-    },
-    {
-      id: crypto.randomUUID(),
-      name: 'Automatisation reporting',
-      owner: 'Yanis',
-      dueDate: '2026-06-28'
-    }
-  ];
-
-  return {
-    projects,
-    tasks: [
-      {
-        id: crypto.randomUUID(),
-        projectId: projects[0].id,
-        title: 'Valider le périmètre fonctionnel',
-        priority: 'Haute',
-        done: false
-      },
-      {
-        id: crypto.randomUUID(),
-        projectId: projects[0].id,
-        title: 'Préparer la migration des contacts',
-        priority: 'Moyenne',
-        done: true
-      },
-      {
-        id: crypto.randomUUID(),
-        projectId: projects[1].id,
-        title: 'Créer les maquettes de navigation',
-        priority: 'Haute',
-        done: false
-      },
-      {
-        id: crypto.randomUUID(),
-        projectId: projects[2].id,
-        title: 'Lister les sources de données',
-        priority: 'Basse',
-        done: false
-      }
-    ]
-  };
-}
-
-function loadState(): ProjectFlowState {
-  const savedState = localStorage.getItem(STORAGE_KEY);
-
-  if (!savedState) {
-    return createSeedState();
-  }
-
-  return JSON.parse(savedState) as ProjectFlowState;
-}
-
-@Component({
-  selector: 'app-root',
-  standalone: true,
-  imports: [CommonModule, FormsModule],
-  templateUrl: './app.component.html'
-})
+@Component({ selector: 'app-root', standalone: true, imports: [CommonModule, ReactiveFormsModule, DragDropModule, MatButtonModule, MatCardModule, MatTabsModule, MatTableModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatCheckboxModule], templateUrl: './app.component.html' })
 export class AppComponent {
-  readonly state = signal<ProjectFlowState>(loadState());
-  readonly activeFilter = signal('all');
-  readonly isProjectModalOpen = signal(false);
-  readonly today = new Date().toISOString().slice(0, 10);
+  private db = inject(AppDbService); private demo = inject(DemoDataService); private excel = inject(ExcelImportService); private csv = inject(CsvImportService); private mapper = inject(TaskMappingService); private planner = inject(PlanningEngineService); private scorer = inject(ScoringService); private priorityResolver = inject(PriorityResolutionService); private fb = inject(FormBuilder);
+  readonly tasks = signal<Task[]>([]); readonly silos = signal<WorkSilo[]>([]); readonly resources = signal<Resource[]>([]); readonly absences = signal<Absence[]>([]); readonly sprints = signal<Sprint[]>([]); readonly sprintTasks = signal<SprintTask[]>([]); readonly slots = signal<any[]>([]); readonly dependencies = signal<TaskDependency[]>([]); readonly revisions = signal<any[]>([]); readonly changes = signal<any[]>([]); readonly preview = signal<ImportPreview | null>(null); readonly importMessage = signal(''); readonly activeSiloFilter = signal('ALL'); readonly manualMode = signal(false);
+  readonly options = PRIORITY_OPTIONS;
+  readonly taskForm = this.fb.nonNullable.group({ title: ['', Validators.required], siloName: ['Demandes métier', Validators.required], estimatedHours: [8, [Validators.required, Validators.min(1)]], assigneeName: [''], vip: [false] });
+  readonly siloForm = this.fb.nonNullable.group({ name: ['', Validators.required], maxWorkInProgress: [5] });
+  readonly resourceForm = this.fb.nonNullable.group({ fullName: ['', Validators.required], dailyCapacityHours: [6, [Validators.required, Validators.min(1)]], weeklyCapacityHours: [30] });
+  readonly absenceForm = this.fb.nonNullable.group({ resourceId: ['', Validators.required], startDate: ['2026-06-03', Validators.required], endDate: ['2026-06-03', Validators.required], reason: ['CONGE'] });
+  readonly sprintForm = this.fb.nonNullable.group({ name: ['', Validators.required], startDate: ['2026-06-03', Validators.required], endDate: ['2026-06-16', Validators.required], status: ['DRAFT'] });
+  readonly dependencyForm = this.fb.nonNullable.group({ predecessorTaskId: ['', Validators.required], successorTaskId: ['', Validators.required] });
+  readonly plannedRows = computed(() => this.sprintTasks().map((st) => ({ ...st, task: this.tasks().find((t) => t.id === st.taskId), sprint: this.sprints().find((s) => s.id === st.sprintId), resource: this.resources().find((r) => r.id === st.assigneeId) })).filter((r) => r.task));
+  readonly unplannedTasks = computed(() => this.tasks().filter((t) => t.planningStatus && t.planningStatus !== 'AUTO_PLANNED'));
+  readonly filteredBacklog = computed(() => { const silo = this.activeSiloFilter(); const list = silo === 'ALL' ? this.tasks() : this.tasks().filter((t) => (t.siloId ?? t.siloName) === silo); return this.priorityResolver.resolve(list); });
+  readonly kpis = computed(() => ({ total: this.tasks().length, planned: this.sprintTasks().length, unplanned: this.unplannedTasks().length, conflict: this.unplannedTasks().filter((t) => ['CONFLICT','CYCLIC_DEPENDENCY','WAITING_PREDECESSOR'].includes(t.planningStatus ?? '')).length, locked: this.tasks().filter((t) => t.locked).length, activeSprints: this.sprints().filter((s) => s.status === 'ACTIVE').length }));
+  async ngOnInit(): Promise<void> { await this.refresh(); }
+  async refresh(): Promise<void> { const s = await this.db.snapshot(); this.tasks.set(s.tasks); this.silos.set(s.workSilos); this.resources.set(s.resources); this.absences.set(s.absences); this.sprints.set(s.sprints); this.sprintTasks.set(s.sprintTasks); this.slots.set(s.slots); this.dependencies.set(s.dependencies); this.revisions.set(s.revisions.sort((a,b) => b.revisionDate.localeCompare(a.revisionDate))); this.changes.set(s.changes); }
+  async loadDemo(): Promise<void> { await this.demo.load(); await this.refresh(); }
+  async onFileSelected(event: Event): Promise<void> { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; this.preview.set(file.name.toLowerCase().endsWith('.csv') ? await this.csv.parse(file) : await this.excel.parse(file)); this.importMessage.set(`Type détecté : ${this.preview()?.type}`); }
+  async validateImport(): Promise<void> { const preview = this.preview(); if (!preview || preview.type === 'UNKNOWN') return; const mapped = this.mapper.mapRows(preview.type, preview.rows); await this.db.db.tasks.bulkPut(mapped); await this.db.db.importSessions.put({ id: crypto.randomUUID(), importDate: new Date().toISOString(), fileName: 'import navigateur', importType: preview.type, source: preview.type === 'GLPI_CSV' ? 'GLPI' : 'CLICKUP', totalRows: preview.totalRows, importedRows: mapped.length, ignoredRows: preview.totalRows - mapped.length, errorRows: 0, status: 'SUCCESS', recognizedColumns: preview.recognizedColumns, unknownColumns: preview.unknownColumns }); this.preview.set(null); await this.replan('NEW_TASK_IMPORTED'); }
+  async addTask(): Promise<void> { if (this.taskForm.invalid) return; const v = this.taskForm.getRawValue(); const prioritization = createDefaultPrioritization({ vipRequestScore: v.vip ? 100 : 0, businessImpactScore: v.vip ? 100 : 50 }); const base: Task = { id: crypto.randomUUID(), source: 'MANUAL', importType: 'UNKNOWN', externalId: crypto.randomUUID(), displayExternalId: 'MANUAL', title: v.title, siloId: v.siloName, siloName: v.siloName, assigneeName: v.assigneeName, assigneeNames: v.assigneeName ? [v.assigneeName] : [], statusRaw: 'NOUVEAU', statusNormalized: 'TODO', priorityRaw: v.vip ? 'URGENT' : 'NORMAL', priorityNormalized: v.vip ? 'CRITICAL' : 'MEDIUM', estimatedHours: v.estimatedHours, remainingHours: v.estimatedHours, importedAt: new Date().toISOString(), metadata: {}, locked: false, manuallyAdjusted: false, prioritization, automaticPriorityScore: 0, effectivePriorityScore: 0, priorityLevel: 'LOW', manualPriorityEnabled: false, predecessorTaskIds: [], successorTaskIds: [], dependencyStatus: 'NONE' }; await this.db.db.tasks.put(this.scorer.scoreTask(base)); this.taskForm.patchValue({ title: '' }); await this.replan('NEW_TASK_IMPORTED'); }
+  async addSilo(): Promise<void> { if (this.siloForm.invalid) return; const v = this.siloForm.getRawValue(); await this.db.db.workSilos.put({ id: v.name, name: v.name, priority: 1, dailyCapacityPercent: 100, sprintCapacityPercent: 100, minimumDailyHours: 1, maxWorkInProgress: v.maxWorkInProgress, active: true }); await this.refresh(); }
+  async addResource(): Promise<void> { if (this.resourceForm.invalid) return; const v = this.resourceForm.getRawValue(); await this.db.db.resources.put({ id: v.fullName, fullName: v.fullName, role: 'DSI', dailyCapacityHours: v.dailyCapacityHours, weeklyCapacityHours: v.weeklyCapacityHours, active: true }); await this.replan('RESOURCE_CAPACITY_CHANGED'); }
+  async addAbsence(): Promise<void> { if (this.absenceForm.invalid) return; const v = this.absenceForm.getRawValue(); await this.db.db.absences.put({ id: crypto.randomUUID(), resourceId: v.resourceId, startDate: v.startDate, endDate: v.endDate, reason: v.reason as any }); await this.replan('RESOURCE_ABSENCE_ADDED'); }
+  async addSprint(): Promise<void> { if (this.sprintForm.invalid) return; const v = this.sprintForm.getRawValue(); await this.db.db.sprints.put({ id: crypto.randomUUID(), name: v.name, startDate: v.startDate, endDate: v.endDate, status: v.status as any, totalCapacityHours: 0, planifiableCapacityHours: 0, bufferCapacityHours: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); await this.replan('SPRINT_DATES_CHANGED'); }
+  async addDependency(): Promise<void> { if (this.dependencyForm.invalid) return; const v = this.dependencyForm.getRawValue(); await this.db.db.taskDependencies.put({ id: crypto.randomUUID(), predecessorTaskId: v.predecessorTaskId, successorTaskId: v.successorTaskId, type: 'FINISH_TO_START', mandatory: true, createdAt: new Date().toISOString() }); await this.replan('TASK_DEPENDENCY_ADDED'); }
+  async drop(event: CdkDragDrop<Task[]>): Promise<void> { const visible = [...this.filteredBacklog()]; moveItemInArray(visible, event.previousIndex, event.currentIndex); const updated = this.priorityResolver.applyManualOrder(this.tasks(), visible.map((t) => t.id)); await this.db.db.tasks.bulkPut(updated); await this.replan('MANUAL_PRIORITY_CHANGED'); }
+  async toggleLock(task: Task): Promise<void> { await this.db.db.tasks.put({ ...task, locked: !task.locked }); await this.replan(task.locked ? 'TASK_UNLOCKED' : 'TASK_LOCKED'); }
+  async updateDuration(task: Task, hours: string): Promise<void> { const h = Number(hours); if (!Number.isFinite(h) || h <= 0) return; await this.db.db.tasks.put({ ...task, estimatedHours: h, remainingHours: h, manuallyAdjusted: true }); await this.replan('TASK_DURATION_CHANGED'); }
+  async setCritical(task: Task): Promise<void> { const updated = this.scorer.scoreTask({ ...task, prioritization: createDefaultPrioritization({ ...task.prioritization, regulatoryUrgencyScore: 100 }), manuallyAdjusted: true }); await this.db.db.tasks.put(updated); await this.replan('TASK_PRIORITY_CHANGED'); }
 
-  readonly projectForm: ProjectFormModel = {
-    name: '',
-    owner: '',
-    dueDate: this.today
-  };
-
-  readonly taskForm: TaskFormModel = {
-    title: '',
-    projectId: this.state().projects[0]?.id ?? '',
-    priority: 'Moyenne'
-  };
-
-  readonly projects = computed(() => this.state().projects);
-  readonly tasks = computed(() => this.state().tasks);
-
-  readonly openTasksCount = computed(() => this.tasks().filter((task) => !task.done).length);
-  readonly highPriorityCount = computed(() => this.tasks().filter((task) => !task.done && task.priority === 'Haute').length);
-
-  readonly averageProgress = computed(() => {
-    const progressValues = this.projects().map((project) => this.getProjectProgress(project.id));
-
-    return progressValues.length
-      ? Math.round(progressValues.reduce((total, progress) => total + progress, 0) / progressValues.length)
-      : 0;
-  });
-
-  readonly filteredTasks = computed(() => {
-    const filter = this.activeFilter();
-
-    return filter === 'all'
-      ? this.tasks()
-      : this.tasks().filter((task) => task.projectId === filter);
-  });
-
-  readonly projectsByDueDate = computed(() =>
-    [...this.projects()].sort((first, second) => new Date(first.dueDate).getTime() - new Date(second.dueDate).getTime())
-  );
-
-  addProject(): void {
-    const project: Project = {
-      id: crypto.randomUUID(),
-      name: this.projectForm.name.trim(),
-      owner: this.projectForm.owner.trim(),
-      dueDate: this.projectForm.dueDate
-    };
-
-    if (!project.name || !project.owner || !project.dueDate) {
-      return;
-    }
-
-    this.updateState((state) => ({
-      ...state,
-      projects: [...state.projects, project]
-    }));
-    this.taskForm.projectId ||= project.id;
-    this.closeProjectForm();
-  }
-
-  addTask(): void {
-    const title = this.taskForm.title.trim();
-
-    if (!title || !this.taskForm.projectId) {
-      return;
-    }
-
-    this.updateState((state) => ({
-      ...state,
-      tasks: [
-        {
-          id: crypto.randomUUID(),
-          projectId: this.taskForm.projectId,
-          title,
-          priority: this.taskForm.priority,
-          done: false
-        },
-        ...state.tasks
-      ]
-    }));
-    this.taskForm.title = '';
-    this.taskForm.priority = 'Moyenne';
-  }
-
-  closeProjectForm(): void {
-    this.isProjectModalOpen.set(false);
-    this.projectForm.name = '';
-    this.projectForm.owner = '';
-    this.projectForm.dueDate = this.today;
-  }
-
-  findProject(projectId: string): Project | undefined {
-    return this.projects().find((project) => project.id === projectId);
-  }
-
-  formatDate(dateString: string): string {
-    return new Intl.DateTimeFormat('fr-FR', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric'
-    }).format(new Date(`${dateString}T12:00:00`));
-  }
-
-  getProjectProgress(projectId: string): number {
-    const tasks = this.getProjectTasks(projectId);
-
-    if (tasks.length === 0) {
-      return 0;
-    }
-
-    const completedTasks = tasks.filter((task) => task.done).length;
-    return Math.round((completedTasks / tasks.length) * 100);
-  }
-
-  getProjectTasks(projectId: string): Task[] {
-    return this.tasks().filter((task) => task.projectId === projectId);
-  }
-
-  openProjectForm(): void {
-    this.projectForm.dueDate = this.today;
-    this.isProjectModalOpen.set(true);
-  }
-
-  priorityClass(priority: Priority): string {
-    const classes: Record<Priority, string> = {
-      Haute: 'bg-red-50 text-red-600 ring-red-100',
-      Moyenne: 'bg-amber-50 text-amber-600 ring-amber-100',
-      Basse: 'bg-emerald-50 text-emerald-600 ring-emerald-100'
-    };
-
-    return classes[priority];
-  }
-
-  setFilter(filter: string): void {
-    this.activeFilter.set(filter);
-  }
-
-  toggleTask(taskId: string): void {
-    this.updateState((state) => ({
-      ...state,
-      tasks: state.tasks.map((task) => task.id === taskId ? { ...task, done: !task.done } : task)
-    }));
-  }
-
-  private saveState(state: ProjectFlowState): void {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }
-
-  private updateState(projector: (state: ProjectFlowState) => ProjectFlowState): void {
-    this.state.update((state) => {
-      const nextState = projector(state);
-      this.saveState(nextState);
-      return nextState;
-    });
-  }
+  taskTitle(id: string | null | undefined): string { return this.tasks().find((t) => t.id === id)?.title ?? '—'; }
+  resourceName(id: string | null | undefined): string { return this.resources().find((r) => r.id === id)?.fullName ?? '—'; }
+  private async replan(trigger: PlanningTriggerEvent): Promise<void> { const snap = await this.db.snapshot(); const result = this.planner.replan({ tasks: snap.tasks, resources: snap.resources, absences: snap.absences, sprints: snap.sprints, dependencies: snap.dependencies, trigger, previousSprintTasks: snap.sprintTasks }); const plannedIds = new Set(result.sprintTasks.map((st) => st.taskId)); const tasks = snap.tasks.map((t) => { const unplanned = result.unplannedTasks.find((u) => u.id === t.id); return plannedIds.has(t.id) ? { ...t, planningStatus: 'AUTO_PLANNED' as const, unplannedReason: null } : unplanned ?? t; }); await this.db.db.transaction('rw', this.db.db.tasks, this.db.db.sprintTasks, this.db.db.sprintPlanningSlots, this.db.db.planningRevisions, this.db.db.planningChanges, async () => { await this.db.db.tasks.bulkPut(tasks); await this.db.db.sprintTasks.clear(); await this.db.db.sprintPlanningSlots.clear(); await this.db.db.sprintTasks.bulkPut(result.sprintTasks); await this.db.db.sprintPlanningSlots.bulkPut(result.slots); await this.db.db.planningRevisions.put(result.revision); await this.db.db.planningChanges.bulkPut(result.changes); }); await this.refresh(); }
 }
